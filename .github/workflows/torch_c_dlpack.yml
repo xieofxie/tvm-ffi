@@ -21,8 +21,13 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "Branch or tag to publish (manual run)"
+        description: "Branch or tag to build"
         required: true
+        type: string
+      publish:
+        description: "Publish the built distributions to PyPI"
+        type: boolean
+        default: false
 
 jobs:
   build_wheels_linux:
@@ -37,8 +42,7 @@ jobs:
         if: ${{ matrix.arch == 'x86_64'}}
       - uses: actions/checkout@v5
         with:
-          repository: apache/tvm-ffi
-          ref: main
+          ref: ${{ inputs.branch }}
           fetch-depth: 0
           submodules: recursive
           path: tvm-ffi
@@ -76,8 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: apache/tvm-ffi
-          ref: main
+          ref: ${{ inputs.branch }}
           fetch-depth: 0
           submodules: recursive
           path: tvm-ffi
@@ -94,6 +97,49 @@ jobs:
         with:
           name: pypi-wheels-windows-${{ matrix.arch }}-${{ matrix.python-version }}
           path: ./tvm-ffi/addons/torch_c_dlpack_ext/wheelhouse/*.whl
+  build_wheels_windows_arm64:
+    runs-on: windows-11-arm
+    env:
+      TORCH_VERSION: "2.16.0.dev20261016+cu134"
+      UV_NO_CONFIG: "1"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+          submodules: recursive
+          path: tvm-ffi
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+      - name: Build ARM64 CPU wheels
+        shell: cmd
+        working-directory: ./tvm-ffi
+        run: addons\torch_c_dlpack_ext\build_aot_wheels.bat ARM64 cp312 "%TORCH_VERSION%"
+      - name: Test installed ARM64 wheels
+        shell: cmd
+        working-directory: ./tvm-ffi
+        run: |
+          uv venv .venv\torch-c-dlpack-test-arm64-cp312 --python cpython-3.12-windows-aarch64-none || exit /b 1
+          call .venv\torch-c-dlpack-test-arm64-cp312\Scripts\activate.bat || exit /b 1
+          uv pip install --prerelease=allow ^
+              --index https://pypi.nvidia.com/nvtorch_oot_nightly/ ^
+              "torch==%TORCH_VERSION%" pytest pytest-xdist numpy setuptools ninja || exit /b 1
+          for %%F in ("build\wheel-arm64-cp312\dist\apache_tvm_ffi-*-cp312-cp312-win_arm64.whl") do (
+              uv pip install --force-reinstall --no-deps "%%F" || exit /b 1
+          )
+          for %%F in ("addons\torch_c_dlpack_ext\wheelhouse\*-cp312-cp312-win_arm64.whl") do (
+              uv pip install --force-reinstall --no-deps "%%F" || exit /b 1
+          )
+          python -m pytest -q -rs -n 0 ^
+              addons\torch_c_dlpack_ext\tests\test_wheel.py ^
+              tests\python\test_optional_torch_c_dlpack.py ^
+              tests\python\test_tensor.py ^
+              tests\python\test_container_dlpack_conversion.py ^
+              tests\python\test_dlpack_exchange_api.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pypi-wheels-windows-arm64-cp312
+          path: ./tvm-ffi/addons/torch_c_dlpack_ext/wheelhouse/*-cp312-cp312-win_arm64.whl
+          if-no-files-found: error
   build_wheels_macos:
     strategy:
       fail-fast: false
@@ -104,8 +150,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: apache/tvm-ffi
-          ref: main
+          ref: ${{ inputs.branch }}
           fetch-depth: 0
           submodules: recursive
           path: tvm-ffi
@@ -123,8 +168,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          repository: apache/tvm-ffi
-          ref: main
+          ref: ${{ inputs.branch }}
           fetch-depth: 0
           submodules: recursive
           path: tvm-ffi
@@ -142,13 +186,13 @@ jobs:
           name: pypi-source
           path: ./tvm-ffi/addons/torch_c_dlpack_ext/dist/*tar.gz
   upload_pypi:
-    needs: [build_wheels_linux, build_wheels_windows, build_wheels_macos, build_source]
+    needs: [build_wheels_linux, build_wheels_windows, build_wheels_windows_arm64, build_wheels_macos, build_source]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       id-token: write
       attestations: write
-    if: github.event_name == 'workflow_dispatch'   # <-- publish only on manual trigger
+    if: github.event_name == 'workflow_dispatch' && inputs.publish
     steps:
       - uses: actions/download-artifact@v4
         with:
